@@ -172,6 +172,48 @@
   .modal-handle { width: 36px; height: 4px; background: var(--border2); border-radius: 2px; margin: 0 auto 16px; }
   .modal-title { font-size: 0.938rem; font-weight: 600; margin-bottom: 16px; }
 </style>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyC2H4k4UtvvpyJr3WStnfHkB1oaqRxXsQw",
+    authDomain: "asset-tracker-9b50f.firebaseapp.com",
+    databaseURL: "https://asset-tracker-9b50f-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "asset-tracker-9b50f",
+    storageBucket: "asset-tracker-9b50f.firebasestorage.app",
+    messagingSenderId: "463173574212",
+    appId: "1:463173574212:web:8a818f147a08c76b122611",
+    measurementId: "G-X6X2HMKXBE"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+  const DATA_PATH = 'userData';
+
+  window._fbReady = false;
+  window._fbSave = async function(data) {
+    try {
+      await set(ref(db, DATA_PATH), data);
+    } catch(e) { console.warn('Firebase save failed', e); }
+  };
+
+  onValue(ref(db, DATA_PATH), (snapshot) => {
+    const data = snapshot.val();
+    if (data && !window._fbReady) {
+      window._fbReady = true;
+      if (data.positions) { positions = data.positions; }
+      if (data.transactions) { transactions = data.transactions; }
+      if (data.dcaPlans) { dcaPlans = data.dcaPlans; }
+      if (data.clecData) { clecData = data.clecData; }
+      render();
+      fetchAllPrices();
+      console.log('Firebase 資料載入完成');
+    } else if (!window._fbReady) {
+      window._fbReady = true;
+    }
+  }, { onlyOnce: true });
+</script>
 </head>
 <body>
 <div id="app">
@@ -348,6 +390,9 @@ function save() {
   DB.set('positions', positions);
   DB.set('transactions', transactions);
   DB.set('dcaPlans', dcaPlans);
+  if (window._fbSave) {
+    window._fbSave({ positions, transactions, dcaPlans, clecData });
+  }
   render();
 }
 
@@ -635,6 +680,9 @@ function saveClec() {
     clecData[ticker] = { value: v, cost: c };
   });
   localStorage.setItem('clecData', JSON.stringify(clecData));
+  if (window._fbSave) {
+    window._fbSave({ positions, transactions, dcaPlans, clecData });
+  }
   render();
   toast('✓ CLEC 配置已更新');
 }
@@ -805,7 +853,7 @@ applyFs();
 document.getElementById('tx-date').valueAsDate = new Date();
 document.getElementById('dca-start').valueAsDate = new Date();
 render();
-fetchAllPrices();
+setTimeout(() => { if (!window._fbReady) { window._fbReady = true; fetchAllPrices(); } }, 3000);
 </script>
 </body>
 </html>
