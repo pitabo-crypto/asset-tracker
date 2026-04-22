@@ -184,6 +184,7 @@
       <div style="display:flex;gap:4px;align-items:center">
         <button onclick="setFs(-1)" style="background:var(--bg3);border:0.5px solid var(--border2);border-radius:6px;color:var(--text2);font-size:16px;width:30px;height:30px;cursor:pointer;display:flex;align-items:center;justify-content:center">A</button>
         <button onclick="setFs(1)" style="background:var(--bg3);border:0.5px solid var(--border2);border-radius:6px;color:var(--text);font-size:20px;width:30px;height:30px;cursor:pointer;display:flex;align-items:center;justify-content:center">A</button>
+        <button id="refresh-btn" onclick="fetchAllPrices()" title="更新報價" style="background:var(--bg3);border:0.5px solid var(--border2);border-radius:6px;color:var(--text2);font-size:14px;width:30px;height:30px;cursor:pointer;display:flex;align-items:center;justify-content:center">↻</button>
       </div>
       <div style="text-align:right">
         <div style="font-size:0.7rem;color:var(--text2)">總資產</div>
@@ -469,14 +470,19 @@ function renderPositions() {
   Object.entries(grouped).forEach(([acct, list]) => {
     if (list.length === 0) return;
     html += `<div class="sec-label">${acctNames[acct]}</div><div class="card">`;
-    list.forEach((p, idx) => {
-      const val = p.shares * p.price;
+    list.forEach((p) => {
+      const livePrice = livePrices[p.ticker];
+      const displayPrice = livePrice !== undefined ? livePrice : p.price;
+      const val = p.shares * displayPrice;
       const pnl = val - p.shares * p.cost;
       const pnlPct = p.cost > 0 ? (pnl / (p.shares * p.cost) * 100).toFixed(1) : '0.0';
+      const priceTag = livePrice !== undefined
+        ? `<span style="font-size:0.6rem;color:var(--green);margin-left:4px">即時</span>`
+        : `<span style="font-size:0.6rem;color:var(--text3);margin-left:4px">手動</span>`;
       html += `<div class="item">
         <div class="item-left">
-          <div class="item-ticker"><span>${p.ticker}</span><span class="badge ${acctBadge[p.account]}">${acctLabel[p.account]}</span></div>
-          <div class="item-meta">${fmtNum(p.shares)} 股｜均價 ${fmtNum(p.cost, 2)}</div>
+          <div class="item-ticker"><span>${p.ticker}</span><span class="badge ${acctBadge[p.account]}">${acctLabel[p.account]}</span>${priceTag}</div>
+          <div class="item-meta">${fmtNum(p.shares)} 股｜均價 ${fmtNum(p.cost, 2)}｜現價 ${fmtNum(displayPrice, 2)}</div>
         </div>
         <div class="item-right" style="display:flex;align-items:center;gap:6px">
           <div>
@@ -717,6 +723,71 @@ function renderClec() {
   });
 }
 
+// ── 即時報價 ─────────────────────────────────────────
+let livePrices = {};
+
+async function fetchTW(tickers) {
+  // 台股：用證交所 mis API，ETF 在上市用 tse，上櫃用 otc
+  // 00662, 00675L, 00865B, 0050 等 ETF 為上市
+  const otcPrefixes = ['006201','006205','00663','00668','00669','006205'];
+  const parts = tickers.map(t => {
+    const clean = t.replace(/\s/g,'');
+    return `tse_${clean}.tw`;
+  });
+  const query = parts.join('|');
+  try {
+    const res = await fetch(`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${query}&json=1&delay=0`);
+    const data = await res.json();
+    if (data.msgArray) {
+      data.msgArray.forEach(item => {
+        const ticker = item.c;
+        const price = parseFloat(item.z !== '-' ? item.z : item.y);
+        if (!isNaN(price)) livePrices[ticker] = price;
+      });
+    }
+  } catch(e) { console.warn('台股報價失敗', e); }
+}
+
+async function fetchUS(tickers) {
+  // 美股：透過 allorigins CORS proxy 串接 Yahoo Finance
+  const symbols = tickers.join(',');
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols}&fields=regularMarketPrice`;
+  const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+  try {
+    const res = await fetch(proxy);
+    const outer = await res.json();
+    const data = JSON.parse(outer.contents);
+    data.quoteResponse.result.forEach(q => {
+      livePrices[q.symbol] = q.regularMarketPrice;
+    });
+  } catch(e) { console.warn('美股報價失敗', e); }
+}
+
+async function fetchAllPrices() {
+  if (positions.length === 0 && Object.keys(clecData).length === 0) return;
+  const btn = document.getElementById('refresh-btn');
+  if (btn) { btn.textContent = '⟳'; btn.style.color = 'var(--amber)'; }
+
+  const twTickers = [...new Set([
+    ...positions.filter(p => p.account === 'tw' || p.account === 'fut').map(p => p.ticker),
+    ...Object.keys(clecData)
+  ])].filter(Boolean);
+
+  const usTickers = [...new Set(
+    positions.filter(p => p.account === 'us').map(p => p.ticker)
+  )].filter(Boolean);
+
+  const tasks = [];
+  if (twTickers.length > 0) tasks.push(fetchTW(twTickers));
+  if (usTickers.length > 0) tasks.push(fetchUS(usTickers));
+  await Promise.all(tasks);
+
+  if (btn) { btn.textContent = '↻'; btn.style.color = 'var(--green)'; setTimeout(() => { btn.style.color = 'var(--text2)'; }, 2000); }
+  const now = new Date().toLocaleString('zh-TW', { hour:'2-digit', minute:'2-digit' });
+  document.getElementById('last-updated').textContent = `報價更新 ${now}`;
+  render();
+}
+
 // ── Font size ─────────────────────────────────────────
 const FS_LEVELS = ['fs-sm','fs-md','fs-lg','fs-xl'];
 let fsIdx = parseInt(localStorage.getItem('fsIdx') || '1');
@@ -734,6 +805,7 @@ applyFs();
 document.getElementById('tx-date').valueAsDate = new Date();
 document.getElementById('dca-start').valueAsDate = new Date();
 render();
+fetchAllPrices();
 </script>
 </body>
 </html>
