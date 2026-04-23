@@ -358,14 +358,28 @@
   <div class="modal">
     <div class="modal-handle"></div>
     <div class="modal-title">新增持倉</div>
+    <div class="form-group" style="margin-bottom:10px">
+      <label>帳戶</label>
+      <select id="pos-account" onchange="onAcctChange();onTickerBlur()">
+        <option value="tw">台股證券</option>
+        <option value="us">美股</option>
+        <option value="fut">台股期貨</option>
+      </select>
+    </div>
+    <div class="form-group" style="margin-bottom:6px">
+      <label>股票代碼 / 名稱</label>
+      <input id="pos-ticker" type="text" placeholder="輸入代碼或名稱，如 00662 或 AAPL" autocomplete="off"
+        oninput="onTickerInput(this.value)" onblur="onTickerBlur()">
+    </div>
+    <div id="pos-lookup-status" style="font-size:0.75rem;color:var(--green);min-height:18px;margin-bottom:8px;padding-left:2px"></div>
+    <div id="pos-suggestions" style="background:var(--bg3);border-radius:var(--r-sm);margin-bottom:10px;overflow:hidden;display:none"></div>
     <div class="form-grid">
-      <div class="form-group"><label>帳戶</label>
-        <select id="pos-account"><option value="us">美股</option><option value="tw">台股證券</option><option value="fut">台股期貨</option></select></div>
-      <div class="form-group"><label>代碼</label><input id="pos-ticker" type="text" placeholder="AAPL"></div>
-      <div class="form-group"><label>名稱（選填）</label><input id="pos-name" type="text" placeholder="蘋果"></div>
-      <div class="form-group"><label>持股數 / 口數</label><input id="pos-shares" type="number" placeholder="100" min="0"></div>
-      <div class="form-group"><label>均價 / 成本</label><input id="pos-cost" type="number" placeholder="0.00" min="0" step="0.01"></div>
-      <div class="form-group"><label>現價</label><input id="pos-price" type="number" placeholder="0.00" min="0" step="0.01"></div>
+      <div class="form-group"><label>股票名稱</label><input id="pos-name" type="text" placeholder="自動帶入"></div>
+      <div class="form-group"><label>券商</label><input id="pos-broker" type="text" placeholder="永豐、富邦..."></div>
+      <div class="form-group"><label id="pos-shares-label">股數 / 口數</label><input id="pos-shares" type="number" placeholder="100" min="0"></div>
+      <div class="form-group"><label id="pos-cost-label">均價 / 開倉點數</label><input id="pos-cost" type="number" placeholder="0.00" min="0" step="0.01"></div>
+      <div class="form-group"><label>現價（自動帶入）</label><input id="pos-price" type="number" placeholder="抓取中..." min="0" step="0.01"></div>
+      <div class="form-group"><label>手續費（選填）</label><input id="pos-fee" type="number" placeholder="0" min="0" step="1"></div>
     </div>
     <button class="btn-primary" style="margin-top:12px" onclick="savePosition()">儲存持倉</button>
   </div>
@@ -438,13 +452,30 @@ function pnlClass(n) { return n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu'; }
 function pnlSign(n) { return n > 0 ? '+' : ''; }
 
 // ── Compute totals ────────────────────────────────────
+const FUT_TICK = { 'TXF': 200, 'MTX': 50, 'MXF': 10, 'TE': 400, 'TF': 200 };
+
+function getFutPnl(p, displayPrice) {
+  const tickVal = FUT_TICK[p.ticker] || 200;
+  return (displayPrice - p.cost) * tickVal * p.shares;
+}
+
 function computeTotals() {
   let byAcct = { us: 0, tw: 0, fut: 0, dca: 0 };
   let totalPnl = 0;
   positions.forEach(p => {
-    const val = p.shares * p.price;
-    const cost = p.shares * p.cost;
-    const pnl = val - cost;
+    const livePrice = livePrices[p.ticker];
+    const displayPrice = livePrice !== undefined ? livePrice : p.price;
+    let val, pnl;
+    if (p.account === 'fut') {
+      const tickVal = FUT_TICK[p.ticker] || 200;
+      const margin = p.cost * tickVal * p.shares;
+      pnl = getFutPnl(p, displayPrice);
+      val = margin + pnl;
+    } else {
+      val = p.shares * displayPrice;
+      const cost = p.shares * p.cost;
+      pnl = val - cost;
+    }
     byAcct[p.account] = (byAcct[p.account] || 0) + val;
     totalPnl += pnl;
   });
@@ -507,27 +538,52 @@ function renderPie(byAcct, total) {
   });
 }
 
+function computePosPnl(p) {
+  const livePrice = livePrices[p.ticker];
+  const displayPrice = livePrice !== undefined ? livePrice : p.price;
+  const fee = p.fee || 0;
+  let pnl, val, pnlPct;
+  if (p.account === 'fut') {
+    const tickVal = FUT_TICK[p.ticker] || 200;
+    pnl = getFutPnl(p, displayPrice) - fee;
+    const margin = p.cost * tickVal * p.shares;
+    val = margin + pnl;
+    pnlPct = margin > 0 ? (pnl / margin * 100) : 0;
+  } else {
+    val = p.shares * displayPrice;
+    const cost = p.shares * p.cost;
+    pnl = val - cost - fee;
+    pnlPct = cost > 0 ? (pnl / cost * 100) : 0;
+  }
+  return { pnl, val, pnlPct: pnlPct.toFixed(1), displayPrice, livePrice };
+}
+
 function renderPositions() {
   const grouped = { us: [], tw: [], fut: [] };
   positions.forEach(p => (grouped[p.account] || []).push(p));
+
+  Object.keys(grouped).forEach(acct => {
+    grouped[acct].sort((a, b) => computePosPnl(b).pnl - computePosPnl(a).pnl);
+  });
+
   const acctNames = { us: '美股帳戶', tw: '台股證券', fut: '台股期貨' };
   let html = '';
   Object.entries(grouped).forEach(([acct, list]) => {
     if (list.length === 0) return;
     html += `<div class="sec-label">${acctNames[acct]}</div><div class="card">`;
     list.forEach((p) => {
-      const livePrice = livePrices[p.ticker];
-      const displayPrice = livePrice !== undefined ? livePrice : p.price;
-      const val = p.shares * displayPrice;
-      const pnl = val - p.shares * p.cost;
-      const pnlPct = p.cost > 0 ? (pnl / (p.shares * p.cost) * 100).toFixed(1) : '0.0';
+      const { pnl, pnlPct, displayPrice, livePrice } = computePosPnl(p);
       const priceTag = livePrice !== undefined
         ? `<span style="font-size:0.6rem;color:var(--green);margin-left:4px">即時</span>`
         : `<span style="font-size:0.6rem;color:var(--text3);margin-left:4px">手動</span>`;
+      const nameStr = p.name ? `<span style="color:var(--text2);font-size:0.75rem;margin-left:4px">${p.name}</span>` : '';
+      const brokerStr = p.broker ? `<span class="badge" style="background:rgba(255,255,255,0.07);color:var(--text2);margin-left:4px">${p.broker}</span>` : '';
+      const unitStr = p.account === 'fut' ? `${p.shares} 口｜開倉 ${fmtNum(p.cost, 0)}｜現價 ${fmtNum(displayPrice, 0)}` : `${fmtNum(p.shares)} 股｜均價 ${fmtNum(p.cost, 2)}｜現價 ${fmtNum(displayPrice, 2)}`;
+      const feeStr = p.fee > 0 ? `｜手續費 $${fmtNum(p.fee)}` : '';
       html += `<div class="item">
         <div class="item-left">
-          <div class="item-ticker"><span>${p.ticker}</span><span class="badge ${acctBadge[p.account]}">${acctLabel[p.account]}</span>${priceTag}</div>
-          <div class="item-meta">${fmtNum(p.shares)} 股｜均價 ${fmtNum(p.cost, 2)}｜現價 ${fmtNum(displayPrice, 2)}</div>
+          <div class="item-ticker"><span>${p.ticker}</span>${nameStr}${brokerStr}<span class="badge ${acctBadge[p.account]}">${acctLabel[p.account]}</span>${priceTag}</div>
+          <div class="item-meta">${unitStr}${feeStr}</div>
         </div>
         <div class="item-right" style="display:flex;align-items:center;gap:6px">
           <div>
@@ -615,6 +671,155 @@ function delTx(i) {
   toast('已刪除');
 }
 
+// ── 股票查詢 ─────────────────────────────────────────
+const TW_STOCKS = {
+  '00662': '富邦美國股市', '00675L': '富邦臺灣加權正2', '00865B': '中信美國公債20年',
+  '0050': '元大台灣50', '0056': '元大高股息', '00878': '國泰永續高股息',
+  '00929': '復華台灣科技優息', '00919': '群益台灣精選高息', '00940': '元大台灣價值高息',
+  '2330': '台積電', '2317': '鴻海', '2454': '聯發科', '2881': '富邦金',
+  '2882': '國泰金', '2886': '兆豐金', '2891': '中信金', '2412': '中華電',
+  '1301': '台塑', '1303': '南亞', '2308': '台達電', '3711': '日月光投控',
+  '2382': '廣達', '2395': '研華', '3008': '大立光', '2357': '華碩',
+  '4938': '和碩', '2379': '瑞昱', '2303': '聯電', '6505': '台塑化',
+  'TXF': '台指期', 'MTX': '小台指', 'MXF': '微台指', 'TE': '電子期',
+};
+const TW_NAME_TO_CODE = Object.fromEntries(Object.entries(TW_STOCKS).map(([k,v])=>[v,k]));
+
+let tickerLookupTimer = null;
+
+function onAcctChange() {
+  const acct = document.getElementById('pos-account').value;
+  const isFut = acct === 'fut';
+  document.getElementById('pos-shares-label').textContent = isFut ? '口數' : '股數';
+  document.getElementById('pos-cost-label').textContent = isFut ? '開倉點數' : '均價';
+}
+
+function onTickerInput(val) {
+  clearTimeout(tickerLookupTimer);
+  const v = val.trim();
+  if (!v) { hideSuggestions(); return; }
+
+  const acct = document.getElementById('pos-account').value;
+  const results = [];
+
+  if (acct === 'tw' || acct === 'fut') {
+    Object.entries(TW_STOCKS).forEach(([code, name]) => {
+      if (code.startsWith(v) || name.includes(v)) results.push({ code, name });
+    });
+  }
+
+  if (results.length > 0) {
+    showSuggestions(results.slice(0, 6));
+  } else {
+    hideSuggestions();
+  }
+
+  if (v.length >= 2) {
+    tickerLookupTimer = setTimeout(() => onTickerBlur(), 800);
+  }
+}
+
+function showSuggestions(list) {
+  const el = document.getElementById('pos-suggestions');
+  el.style.display = '';
+  el.innerHTML = list.map(({code, name}) =>
+    `<div onclick="selectStock('${code}','${name}')" style="padding:8px 12px;font-size:0.8rem;border-bottom:0.5px solid var(--border);cursor:pointer;display:flex;justify-content:space-between">
+      <span style="font-weight:600">${code}</span><span style="color:var(--text2)">${name}</span>
+    </div>`
+  ).join('');
+}
+
+function hideSuggestions() {
+  document.getElementById('pos-suggestions').style.display = 'none';
+}
+
+function selectStock(code, name) {
+  document.getElementById('pos-ticker').value = code;
+  document.getElementById('pos-name').value = name;
+  hideSuggestions();
+  lookupPrice(code);
+}
+
+async function onTickerBlur() {
+  hideSuggestions();
+  const ticker = document.getElementById('pos-ticker').value.trim().toUpperCase();
+  if (!ticker) return;
+
+  if (TW_STOCKS[ticker]) {
+    document.getElementById('pos-name').value = TW_STOCKS[ticker];
+  } else if (TW_NAME_TO_CODE[ticker]) {
+    const code = TW_NAME_TO_CODE[ticker];
+    document.getElementById('pos-ticker').value = code;
+    document.getElementById('pos-name').value = ticker;
+  }
+
+  await lookupPrice(ticker);
+}
+
+async function lookupPrice(ticker) {
+  const statusEl = document.getElementById('pos-lookup-status');
+  const priceEl = document.getElementById('pos-price');
+  const acct = document.getElementById('pos-account').value;
+
+  statusEl.textContent = '⟳ 查詢現價中...';
+  statusEl.style.color = 'var(--amber)';
+  priceEl.placeholder = '查詢中...';
+
+  try {
+    let price = null;
+    if (acct === 'tw' || acct === 'fut') {
+      const clean = ticker.replace(/\s/g,'');
+      const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${clean}.tw&json=1&delay=0`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.msgArray && data.msgArray[0]) {
+        const item = data.msgArray[0];
+        price = parseFloat(item.z !== '-' ? item.z : item.y);
+        if (!TW_STOCKS[ticker] && item.n) document.getElementById('pos-name').value = item.n;
+      }
+      if (!price || isNaN(price)) {
+        const url2 = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=otc_${clean}.tw&json=1&delay=0`;
+        const res2 = await fetch(url2);
+        const data2 = await res2.json();
+        if (data2.msgArray && data2.msgArray[0]) {
+          const item2 = data2.msgArray[0];
+          price = parseFloat(item2.z !== '-' ? item2.z : item2.y);
+          if (!TW_STOCKS[ticker] && item2.n) document.getElementById('pos-name').value = item2.n;
+        }
+      }
+    } else {
+      const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${ticker}&fields=regularMarketPrice,longName,shortName`;
+      const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+      const res = await fetch(proxy);
+      const outer = await res.json();
+      const data = JSON.parse(outer.contents);
+      if (data.quoteResponse && data.quoteResponse.result[0]) {
+        const q = data.quoteResponse.result[0];
+        price = q.regularMarketPrice;
+        const name = q.longName || q.shortName || '';
+        if (name && !document.getElementById('pos-name').value) {
+          document.getElementById('pos-name').value = name;
+        }
+      }
+    }
+
+    if (price && !isNaN(price)) {
+      priceEl.value = price.toFixed(2);
+      priceEl.placeholder = '0.00';
+      statusEl.textContent = `✓ 現價 ${price.toFixed(2)} 已帶入`;
+      statusEl.style.color = 'var(--green)';
+    } else {
+      statusEl.textContent = '找不到報價，請手動輸入';
+      statusEl.style.color = 'var(--text3)';
+      priceEl.placeholder = '手動輸入';
+    }
+  } catch(e) {
+    statusEl.textContent = '報價查詢失敗，請手動輸入';
+    statusEl.style.color = 'var(--text3)';
+    priceEl.placeholder = '手動輸入';
+  }
+}
+
 function savePosition() {
   const ticker = document.getElementById('pos-ticker').value.trim().toUpperCase();
   const shares = parseFloat(document.getElementById('pos-shares').value);
@@ -624,9 +829,12 @@ function savePosition() {
   positions.push({
     ticker, shares, cost, price,
     account: document.getElementById('pos-account').value,
-    name: document.getElementById('pos-name').value.trim()
+    name: document.getElementById('pos-name').value.trim(),
+    broker: document.getElementById('pos-broker').value.trim(),
+    fee: parseFloat(document.getElementById('pos-fee').value) || 0,
   });
-  ['pos-ticker','pos-shares','pos-cost','pos-price','pos-name'].forEach(id => document.getElementById(id).value = '');
+  ['pos-ticker','pos-shares','pos-cost','pos-price','pos-name','pos-broker','pos-fee'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('pos-lookup-status').textContent = '';
   document.getElementById('pos-modal').classList.remove('open');
   save();
   toast('✓ 持倉已新增');
